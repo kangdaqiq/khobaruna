@@ -96,6 +96,8 @@ Route::prefix('penilaian')->name('penilaian.')->group(function () {
     Route::get('/kelas/{kelas}/mapel/{mapel}', [PenilaianController::class, 'input'])->name('input');
     Route::post('/kelas/{kelas}/mapel/{mapel}', [PenilaianController::class, 'store'])->name('store');
     Route::post('/kelas/{kelas}/mapel/{mapel}/sync-sas', [PenilaianController::class, 'syncSas'])->name('sync-sas');
+    Route::post('/kelas/{kelas}/mapel/{mapel}/sync-cbt', [PenilaianController::class, 'syncCbt'])->name('sync-cbt');
+    Route::get('/kelas/{kelas}/mapel/{mapel}/cbt-exams', [PenilaianController::class, 'getCbtExams'])->name('cbt-exams');
 });
 
 // Capaian Pembelajaran (CP) & Tujuan Pembelajaran (TP) Kurikulum Merdeka

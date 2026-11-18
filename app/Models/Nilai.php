@@ -68,5 +68,18 @@ class Nilai extends Model
     {
         return $this->belongsTo(Guru::class, 'guru_id');
     }
+
+    /**
+     * Alias STS (Sumatif Tengah Semester) untuk nilai_uts
+     */
+    public function getNilaiStsAttribute(): ?float
+    {
+        return $this->nilai_uts;
+    }
+
+    public function setNilaiStsAttribute($value): void
+    {
+        $this->attributes['nilai_uts'] = $value !== null && $value !== '' ? (float) $value : null;
+    }
 }
 

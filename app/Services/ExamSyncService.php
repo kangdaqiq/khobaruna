@@ -104,10 +104,85 @@ class ExamSyncService
     }
 
     /**
+     * Dapatkan daftar seluruh pelaksanaan ujian di Exam Web yang relevan untuk mata pelajaran ini
+     */
+    public function getAvailableExamsForMapel(int $mapelId): array
+    {
+        if (!$this->checkConnection()) {
+            return [];
+        }
+
+        $mapel = Mapel::find($mapelId);
+        if (!$mapel) return [];
+
+        $examMapel = null;
+        if (!empty($mapel->sync_id)) {
+            $examMapel = DB::connection('exam_db')->table('mapels')
+                ->where('sync_id', $mapel->sync_id)
+                ->first();
+        }
+        if (!$examMapel) {
+            $examMapel = DB::connection('exam_db')->table('mapels')
+                ->where('nama_mapel', 'LIKE', '%' . trim($mapel->nama_mapel) . '%')
+                ->first();
+        }
+
+        if (!$examMapel) {
+            return [];
+        }
+
+        try {
+            $ujians = DB::connection('exam_db')->table('ujians')
+                ->where('mapel_id', $examMapel->id)
+                ->orderBy('id', 'desc')
+                ->get();
+
+            $list = [];
+            foreach ($ujians as $u) {
+                $pesertaCount = DB::connection('exam_db')->table('ujian_pesertas')
+                    ->where('ujian_id', $u->id)
+                    ->where('status', 'SELESAI')
+                    ->whereNotNull('nilai')
+                    ->count();
+
+                $list[] = [
+                    'id' => $u->id,
+                    'exam_id' => $u->exam_id,
+                    'nama_ujian' => $u->nama_ujian,
+                    'tipe_ujian' => $u->tipe_ujian,
+                    'status' => $u->status,
+                    'tanggal' => $u->tanggal,
+                    'jumlah_peserta_selesai' => $pesertaCount,
+                ];
+            }
+
+            return $list;
+        } catch (\Throwable $e) {
+            Log::error("Gagal getAvailableExamsForMapel: " . $e->getMessage());
+            return [];
+        }
+    }
+
+    /**
      * Tarik nilai SAS khusus untuk 1 Rombel & 1 Mapel tertentu (digunakan oleh Guru di Lembar Nilai)
      */
     public function syncSasForClassSubject(int $kelasId, int $mapelId, string $tahunAjaran = '2024/2025', string $semester = 'Ganjil'): array
     {
+        return $this->syncScoresForClassSubject($kelasId, $mapelId, 'sas', null, null, $tahunAjaran, $semester);
+    }
+
+    /**
+     * Tarik nilai fleksibel (SAS, STS / Tengah Semester, atau Asesmen Harian) dari Exam Web ke E-Rapor
+     */
+    public function syncScoresForClassSubject(
+        int $kelasId,
+        int $mapelId,
+        string $targetType = 'sas',
+        ?int $ujianId = null,
+        ?int $sumatifIndex = null,
+        string $tahunAjaran = '2025/2026',
+        string $semester = '2'
+    ): array {
         if (!$this->checkConnection()) {
             return [
                 'success' => false,
@@ -133,8 +208,10 @@ class ExamSyncService
             ->first();
 
         $guruId = $gmk ? $gmk->guru_id : 1;
-        $bobotHarian = $gmk && $gmk->bobot_harian ? $gmk->bobot_harian : 60;
-        $bobotSas = $gmk && $gmk->bobot_sas ? $gmk->bobot_sas : 40;
+        $jumlahSumatif = $gmk && $gmk->jumlah_sumatif ? $gmk->jumlah_sumatif : 3;
+        $bobotHarian = $gmk && isset($gmk->bobot_harian) ? (int)$gmk->bobot_harian : 50;
+        $bobotSts = $gmk && isset($gmk->bobot_sts) ? (int)$gmk->bobot_sts : 20;
+        $bobotSas = $gmk && isset($gmk->bobot_sas) ? (int)$gmk->bobot_sas : 30;
 
         // Cari mapel di exam_web berdasarkan sync_id atau nama
         $examMapel = null;
@@ -157,19 +234,55 @@ class ExamSyncService
             ];
         }
 
-        // Cari ujian SAS untuk mapel ini
-        $ujianIds = DB::connection('exam_db')->table('ujians')
-            ->where('mapel_id', $examMapel->id)
-            ->where(function ($q) {
-                $q->where('tipe_ujian', 'asesmen_akhir_semester')
-                  ->orWhere('exam_id', 'LIKE', 'SAS-%');
-            })
-            ->pluck('id');
+        // Tentukan ujian_id yang diambil
+        $ujianIds = [];
+        if ($ujianId) {
+            $ujianIds = [$ujianId];
+        } else {
+            if ($targetType === 'sas') {
+                $ujianIds = DB::connection('exam_db')->table('ujians')
+                    ->where('mapel_id', $examMapel->id)
+                    ->where(function ($q) {
+                        $q->where('tipe_ujian', 'asesmen_akhir_semester')
+                          ->orWhere('exam_id', 'LIKE', 'SAS-%');
+                    })
+                    ->pluck('id')
+                    ->toArray();
+            } elseif ($targetType === 'sts') {
+                $ujianIds = DB::connection('exam_db')->table('ujians')
+                    ->where('mapel_id', $examMapel->id)
+                    ->where(function ($q) {
+                        $q->where('tipe_ujian', 'asesmen_tengah_semester')
+                          ->orWhere('exam_id', 'LIKE', 'STS-%')
+                          ->orWhere('exam_id', 'LIKE', 'PTS-%')
+                          ->orWhere('nama_ujian', 'LIKE', '%STS%')
+                          ->orWhere('nama_ujian', 'LIKE', '%Tengah Semester%')
+                          ->orWhere('nama_ujian', 'LIKE', '%PTS%');
+                    })
+                    ->pluck('id')
+                    ->toArray();
+            } elseif ($targetType === 'harian') {
+                $ujianIds = DB::connection('exam_db')->table('ujians')
+                    ->where('mapel_id', $examMapel->id)
+                    ->where(function ($q) {
+                        $q->where('tipe_ujian', 'asesmen_harian')
+                          ->orWhere('exam_id', 'LIKE', 'SH-%')
+                          ->orWhere('nama_ujian', 'LIKE', '%Harian%');
+                    })
+                    ->pluck('id')
+                    ->toArray();
+            }
+        }
 
-        if ($ujianIds->isEmpty()) {
+        if (empty($ujianIds)) {
+            $labelType = match($targetType) {
+                'sts' => 'Sumatif Tengah Semester (STS)',
+                'harian' => 'Asesmen Harian (SH)',
+                default => 'Ujian Akhir Semester (SAS)',
+            };
             return [
                 'success' => false,
-                'message' => "Belum ada pelaksanaan Ujian Akhir Semester (SAS) untuk mata pelajaran '{$mapel->nama_mapel}' di Exam Web.",
+                'message' => "Belum ada pelaksanaan ujian {$labelType} untuk mata pelajaran '{$mapel->nama_mapel}' di CBT Exam Web.",
                 'updated_count' => 0,
             ];
         }
@@ -220,7 +333,7 @@ class ExamSyncService
         if ($pesertaResults->isEmpty()) {
             return [
                 'success' => false,
-                'message' => "Belum ada siswa di kelas {$kelas->nama_kelas} yang menyelesaikan ujian SAS mapel {$mapel->nama_mapel} di CBT.",
+                'message' => "Belum ada siswa di kelas {$kelas->nama_kelas} yang menyelesaikan ujian ini di CBT Exam Web.",
                 'updated_count' => 0,
             ];
         }
@@ -256,18 +369,56 @@ class ExamSyncService
 
                 $nilaiRec->school_id = $targetSiswa->school_id ?? $kelas->school_id;
                 $nilaiRec->guru_id = $guruId;
-                $nilaiRec->nilai_uas = (float) $res->nilai;
 
-                // Hitung nilai akhir jika ada rata-rata sumatif harian
-                $rslm = $nilaiRec->rata_sumatif_harian;
-                $sas = (float) $res->nilai;
+                $scoreVal = (float) $res->nilai;
 
-                if ($rslm !== null && $rslm !== '') {
-                    $totalBobot = $bobotHarian + $bobotSas;
-                    if ($totalBobot > 0) {
-                        $nilaiAkhir = (($rslm * $bobotHarian) + ($sas * $bobotSas)) / $totalBobot;
-                        $nilaiRec->nilai_akhir = round($nilaiAkhir, 1);
+                // Terapkan nilai ke target kolom yang sesuai
+                if ($targetType === 'sts') {
+                    $nilaiRec->nilai_uts = $scoreVal; // STS
+                } elseif ($targetType === 'harian') {
+                    $idx = ($sumatifIndex >= 1 && $sumatifIndex <= 6) ? $sumatifIndex : 1;
+                    $nilaiRec->{"sumatif_{$idx}"} = $scoreVal;
+
+                    // Hitung ulang rata-rata sumatif harian
+                    $validSumatifs = [];
+                    for ($s = 1; $s <= $jumlahSumatif; $s++) {
+                        $val = $nilaiRec->{"sumatif_{$s}"};
+                        if ($val !== null && $val !== '') {
+                            $validSumatifs[] = (float) $val;
+                        }
                     }
+                    if (count($validSumatifs) > 0) {
+                        $nilaiRec->rata_sumatif_harian = round(array_sum($validSumatifs) / count($validSumatifs), 1);
+                        $nilaiRec->nilai_tugas = $nilaiRec->rata_sumatif_harian;
+                    }
+                } else {
+                    // Default SAS
+                    $nilaiRec->nilai_uas = $scoreVal;
+                }
+
+                // Kalkulasi Nilai Akhir (NA) Komprehensif (Harian + STS + SAS)
+                $rslm = $nilaiRec->rata_sumatif_harian;
+                $sts = $nilaiRec->nilai_uts;
+                $sas = $nilaiRec->nilai_uas;
+
+                $weightedSum = 0;
+                $totalActiveWeight = 0;
+
+                if ($rslm !== null && $rslm !== '' && $bobotHarian > 0) {
+                    $weightedSum += ($rslm * $bobotHarian);
+                    $totalActiveWeight += $bobotHarian;
+                }
+                if ($sts !== null && $sts !== '' && $bobotSts > 0) {
+                    $weightedSum += ($sts * $bobotSts);
+                    $totalActiveWeight += $bobotSts;
+                }
+                if ($sas !== null && $sas !== '' && $bobotSas > 0) {
+                    $weightedSum += ($sas * $bobotSas);
+                    $totalActiveWeight += $bobotSas;
+                }
+
+                if ($totalActiveWeight > 0) {
+                    $nilaiRec->nilai_akhir = round($weightedSum / $totalActiveWeight, 1);
                 }
 
                 $nilaiRec->save();
@@ -276,14 +427,20 @@ class ExamSyncService
 
             DB::commit();
 
+            $targetLabel = match($targetType) {
+                'sts' => 'nilai STS (Sumatif Tengah Semester)',
+                'harian' => "nilai Sumatif Harian ke-{$sumatifIndex}",
+                default => 'nilai SAS (Asesmen Akhir Semester)',
+            };
+
             return [
                 'success' => true,
-                'message' => "Berhasil menyinkronkan {$updatedCount} nilai SAS dari Exam Web untuk kelas {$kelas->nama_kelas}.",
+                'message' => "Berhasil menyinkronkan {$updatedCount} {$targetLabel} dari CBT Exam Web untuk kelas {$kelas->nama_kelas}.",
                 'updated_count' => $updatedCount,
             ];
         } catch (\Throwable $e) {
             DB::rollBack();
-            Log::error("Gagal syncSasForClassSubject: " . $e->getMessage());
+            Log::error("Gagal syncScoresForClassSubject: " . $e->getMessage());
             return [
                 'success' => false,
                 'message' => 'Terjadi kesalahan saat menyimpan nilai: ' . $e->getMessage(),

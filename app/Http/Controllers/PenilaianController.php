@@ -111,7 +111,7 @@ class PenilaianController extends Controller
     /**
      * Lembar Penilaian Siswa per Kelas dan Mapel
      */
-    public function input(Kelas $kelas, Mapel $mapel)
+    public function input(Kelas $kelas, Mapel $mapel, ExamSyncService $examSyncService)
     {
         $this->authorizeTeacherForClassAndMapel($kelas, $mapel);
 
@@ -147,8 +147,13 @@ class PenilaianController extends Controller
             $jumlahSumatif = $assignedGuru?->jumlah_sumatif ?: 3;
         }
 
-        $bobotHarian = $assignedGuru?->bobot_harian ?: 60;
-        $bobotSas = $assignedGuru?->bobot_sas ?: 40;
+        // Bobot Harian, STS (Tengah Semester), dan SAS (Akhir Semester)
+        $bobotHarian = $assignedGuru?->bobot_harian ?? 50;
+        $bobotSts = $assignedGuru?->bobot_sts ?? 20;
+        $bobotSas = $assignedGuru?->bobot_sas ?? 30;
+
+        // Ambil daftar ujian dari CBT Exam Web untuk modal penarikan nilai
+        $cbtExams = $examSyncService->getAvailableExamsForMapel($mapel->id);
 
         return view('pages.penilaian.input', compact(
             'kelas',
@@ -159,15 +164,17 @@ class PenilaianController extends Controller
             'jumlahSumatif',
             'tpCount',
             'bobotHarian',
+            'bobotSts',
             'bobotSas',
             'tps',
             'activeTahunAjaran',
-            'activeSemester'
+            'activeSemester',
+            'cbtExams'
         ));
     }
 
     /**
-     * Simpan / Perbarui Nilai Siswa (Sumatif 1-6, Nilai SAS, Rasio Custom, Nilai Akhir)
+     * Simpan / Perbarui Nilai Siswa (Sumatif 1-6, Nilai STS, Nilai SAS, Rasio Custom, Nilai Akhir)
      */
     public function store(Request $request, Kelas $kelas, Mapel $mapel)
     {
@@ -183,13 +190,15 @@ class PenilaianController extends Controller
 
         // Simpan setting rasio custom & jumlah sumatif untuk kelas-mapel ini
         $jumlahSumatif = max(1, min(6, (int) $request->input('jumlah_sumatif', 3)));
-        $bobotHarian = (int) $request->input('bobot_harian', 60);
-        $bobotSas = (int) $request->input('bobot_sas', 40);
+        $bobotHarian = (int) $request->input('bobot_harian', 50);
+        $bobotSts = (int) $request->input('bobot_sts', 20);
+        $bobotSas = (int) $request->input('bobot_sas', 30);
 
         if ($assigned) {
             $assigned->update([
                 'jumlah_sumatif' => $jumlahSumatif,
                 'bobot_harian' => $bobotHarian,
+                'bobot_sts' => $bobotSts,
                 'bobot_sas' => $bobotSas,
             ]);
         }
@@ -221,22 +230,35 @@ class PenilaianController extends Controller
                 $rataHarian = round(array_sum($validSumatifs) / count($validSumatifs), 1);
             }
 
+            // Nilai STS (Sumatif Tengah Semester / UTS)
+            $sts = null;
+            if (isset($row['sts']) && $row['sts'] !== '') {
+                $sts = (float) $row['sts'];
+            } elseif (isset($row['uts']) && $row['uts'] !== '') {
+                $sts = (float) $row['uts'];
+            }
+
             // Nilai SAS (UAS)
             $sas = (isset($row['uas']) && $row['uas'] !== '') ? (float) $row['uas'] : null;
 
-            // Hitung Nilai Akhir berdasarkan Rasio Custom Guru
-            $nilaiAkhir = null;
-            $totalBobot = $bobotHarian + $bobotSas;
+            // Hitung Nilai Akhir Komprehensif (Rata-rata Harian + STS + SAS)
+            $weightedSum = 0;
+            $totalActiveWeight = 0;
 
-            if ($totalBobot > 0) {
-                if ($rataHarian !== null && $sas !== null) {
-                    $nilaiAkhir = round((($rataHarian * $bobotHarian) + ($sas * $bobotSas)) / $totalBobot, 1);
-                } elseif ($rataHarian !== null && $sas === null) {
-                    $nilaiAkhir = $rataHarian;
-                } elseif ($rataHarian === null && $sas !== null) {
-                    $nilaiAkhir = $sas;
-                }
+            if ($rataHarian !== null && $bobotHarian > 0) {
+                $weightedSum += ($rataHarian * $bobotHarian);
+                $totalActiveWeight += $bobotHarian;
             }
+            if ($sts !== null && $bobotSts > 0) {
+                $weightedSum += ($sts * $bobotSts);
+                $totalActiveWeight += $bobotSts;
+            }
+            if ($sas !== null && $bobotSas > 0) {
+                $weightedSum += ($sas * $bobotSas);
+                $totalActiveWeight += $bobotSas;
+            }
+
+            $nilaiAkhir = $totalActiveWeight > 0 ? round($weightedSum / $totalActiveWeight, 1) : null;
 
             Nilai::updateOrCreate(
                 [
@@ -257,7 +279,8 @@ class PenilaianController extends Controller
                     'sumatif_6' => $sumatifs['sumatif_6'],
                     'rata_sumatif_harian' => $rataHarian,
                     'nilai_tugas' => $rataHarian, // kompatibilitas kolom legacy tugas
-                    'nilai_uas' => $sas,
+                    'nilai_uts' => $sts,          // STS (Sumatif Tengah Semester)
+                    'nilai_uas' => $sas,          // SAS (Sumatif Akhir Semester)
                     'nilai_akhir' => $nilaiAkhir,
                     'capaian_kompetensi' => !empty($row['capaian']) ? trim($row['capaian']) : null,
                 ]
@@ -266,11 +289,11 @@ class PenilaianController extends Controller
         }
 
         return redirect()->route('penilaian.input', [$kelas->id, $mapel->id])
-            ->with('success', "Berhasil menyimpan penilaian untuk {$savedCount} siswa di kelas {$kelas->nama_kelas} (Tahun: {$activeTahunAjaran}, Semester: {$activeSemester}) dengan rasio {$bobotHarian}:{$bobotSas}.");
+            ->with('success', "Berhasil menyimpan penilaian untuk {$savedCount} siswa di kelas {$kelas->nama_kelas} (Tahun: {$activeTahunAjaran}, Semester: {$activeSemester}) dengan rasio Harian:STS:SAS ({$bobotHarian}:{$bobotSts}:{$bobotSas}).");
     }
 
     /**
-     * Tarik Nilai SAS dari Exam Web untuk Rombel dan Mapel Ini
+     * Tarik Nilai SAS dari Exam Web untuk Rombel dan Mapel Ini (Legacy/Shortcut)
      */
     public function syncSas(Kelas $kelas, Mapel $mapel, ExamSyncService $examSyncService)
     {
@@ -280,7 +303,7 @@ class PenilaianController extends Controller
         $activeTahunAjaran = $school->tahun_ajaran ?? '2025/2026';
         $activeSemester = $school->semester ?? '2';
 
-        $result = $examSyncService->syncSasForClassSubject($kelas->id, $mapel->id, $activeTahunAjaran, $activeSemester);
+        $result = $examSyncService->syncScoresForClassSubject($kelas->id, $mapel->id, 'sas', null, null, $activeTahunAjaran, $activeSemester);
 
         if ($result['success']) {
             return redirect()->route('penilaian.input', [$kelas->id, $mapel->id])
@@ -289,6 +312,52 @@ class PenilaianController extends Controller
 
         return redirect()->route('penilaian.input', [$kelas->id, $mapel->id])
             ->with('error', $result['message']);
+    }
+
+    /**
+     * Tarik Nilai Fleksibel dari CBT Exam Web (SAS, STS, atau Asesmen Harian ke Sumatif 1-6)
+     */
+    public function syncCbt(Request $request, Kelas $kelas, Mapel $mapel, ExamSyncService $examSyncService)
+    {
+        $this->authorizeTeacherForClassAndMapel($kelas, $mapel);
+
+        $request->validate([
+            'target_type' => 'required|in:sas,sts,harian',
+            'ujian_id' => 'nullable|integer',
+            'sumatif_index' => 'nullable|integer|min:1|max:6',
+        ]);
+
+        $school = School::first();
+        $activeTahunAjaran = $school->tahun_ajaran ?? '2025/2026';
+        $activeSemester = $school->semester ?? '2';
+
+        $result = $examSyncService->syncScoresForClassSubject(
+            $kelas->id,
+            $mapel->id,
+            $request->input('target_type'),
+            $request->filled('ujian_id') ? (int) $request->input('ujian_id') : null,
+            $request->filled('sumatif_index') ? (int) $request->input('sumatif_index') : null,
+            $activeTahunAjaran,
+            $activeSemester
+        );
+
+        if ($result['success']) {
+            return redirect()->route('penilaian.input', [$kelas->id, $mapel->id])
+                ->with('success', $result['message']);
+        }
+
+        return redirect()->route('penilaian.input', [$kelas->id, $mapel->id])
+            ->with('error', $result['message']);
+    }
+
+    /**
+     * API: Dapatkan daftar pelaksanaan ujian di Exam Web untuk mapel ini
+     */
+    public function getCbtExams(Kelas $kelas, Mapel $mapel, ExamSyncService $examSyncService)
+    {
+        $this->authorizeTeacherForClassAndMapel($kelas, $mapel);
+        $exams = $examSyncService->getAvailableExamsForMapel($mapel->id);
+        return response()->json($exams);
     }
 
     /**

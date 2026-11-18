@@ -3,11 +3,17 @@
 @section('content')
 <div x-data="{
     jumlahSumatif: {{ $jumlahSumatif }},
-    bobotHarian: {{ $bobotHarian }},
-    bobotSas: {{ $bobotSas }},
+    bobotHarian: {{ $bobotHarian ?? 50 }},
+    bobotSts: {{ $bobotSts ?? 20 }},
+    bobotSas: {{ $bobotSas ?? 30 }},
     kkmKelas: {{ $kelas->kkm ?? 75 }},
     tpCount: {{ $tpCount ?? $tps->count() }},
     tpsList: {{ json_encode($tps->values()) }},
+    modalSyncCbt: false,
+    syncTargetType: 'sas',
+    syncSumatifIndex: 1,
+    syncUjianId: '',
+    cbtExams: {{ json_encode($cbtExams ?? []) }},
     scores: {},
 
     init() {
@@ -21,6 +27,7 @@
                 s5: '{{ $n?->sumatif_5 ?? '' }}',
                 s6: '{{ $n?->sumatif_6 ?? '' }}',
                 rataHarian: '{{ $n?->rata_sumatif_harian ?? '' }}',
+                sts: '{{ $n?->nilai_uts ?? '' }}',
                 uas: '{{ $n?->nilai_uas ?? '' }}',
                 akhir: '{{ $n?->nilai_akhir ?? '' }}',
                 capaian: '{{ addslashes($n?->capaian_kompetensi ?? '') }}'
@@ -29,8 +36,9 @@
         @endforeach
     },
 
-    setPresetRatio(harian, sas) {
+    setPresetRatio(harian, sts, sas) {
         this.bobotHarian = harian;
+        this.bobotSts = sts;
         this.bobotSas = sas;
         this.recalculateAll();
     },
@@ -65,24 +73,33 @@
         let rata = count > 0 ? (Math.round((total / count) * 10) / 10).toFixed(1) : '';
         sc.rataHarian = rata;
 
-        // Hitung Nilai Akhir berdasarkan Rasio Custom
+        // Hitung Nilai Akhir berdasarkan Rasio Bobot Komprehensif (Harian + STS + SAS)
         let rHarian = parseFloat(rata);
+        let rSts = parseFloat(sc.sts);
         let rSas = parseFloat(sc.uas);
-        let bHarian = parseFloat(this.bobotHarian) || 0;
-        let bSas = parseFloat(this.bobotSas) || 0;
-        let totalBobot = bHarian + bSas;
 
-        if (totalBobot > 0) {
-            if (!isNaN(rHarian) && !isNaN(rSas)) {
-                let na = ((rHarian * bHarian) + (rSas * bSas)) / totalBobot;
-                sc.akhir = (Math.round(na * 10) / 10).toFixed(1);
-            } else if (!isNaN(rHarian) && isNaN(rSas)) {
-                sc.akhir = rHarian.toFixed(1);
-            } else if (isNaN(rHarian) && !isNaN(rSas)) {
-                sc.akhir = rSas.toFixed(1);
-            } else {
-                sc.akhir = '';
-            }
+        let bHarian = parseFloat(this.bobotHarian) || 0;
+        let bSts = parseFloat(this.bobotSts) || 0;
+        let bSas = parseFloat(this.bobotSas) || 0;
+
+        let weightedSum = 0;
+        let totalWeight = 0;
+
+        if (!isNaN(rHarian) && bHarian > 0) {
+            weightedSum += (rHarian * bHarian);
+            totalWeight += bHarian;
+        }
+        if (!isNaN(rSts) && bSts > 0) {
+            weightedSum += (rSts * bSts);
+            totalWeight += bSts;
+        }
+        if (!isNaN(rSas) && bSas > 0) {
+            weightedSum += (rSas * bSas);
+            totalWeight += bSas;
+        }
+
+        if (totalWeight > 0) {
+            sc.akhir = (Math.round((weightedSum / totalWeight) * 10) / 10).toFixed(1);
         } else {
             sc.akhir = '';
         }
@@ -267,22 +284,22 @@
             </div>
         </div>
 
-        <!-- Tombol Aksi Cepat: Tarik Nilai SAS dari Exam Web & Kelola TP -->
+        <!-- Tombol Aksi Cepat: Tarik Nilai CBT Exam & Kelola TP -->
         <div class="flex flex-wrap items-center gap-2.5">
             <a href="{{ route('kurikulum.cp-tp.index', ['mapel_id' => $mapel->id, 'tingkat' => $kelas->tingkat]) }}" target="_blank" class="inline-flex items-center gap-2 rounded-xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 px-3.5 py-2 text-xs font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 shadow-theme-xs transition" title="Kelola Tujuan Pembelajaran (TP) untuk mapel ini">
                 <i class="fa-solid fa-bullseye text-brand-500 text-xs"></i>
                 <span>Kelola CP & TP</span>
             </a>
 
-            <form id="sync-sas-form" action="{{ route('penilaian.sync-sas', [$kelas->id, $mapel->id]) }}" method="POST">
-                @csrf
-                <button type="submit"
-                    onclick="return confirm('Tarik nilai Ujian Akhir Semester (SAS) dari CBT Exam Web untuk kelas {{ $kelas->nama_kelas }}? Nilai SAS siswa yang sudah selesai ujian akan diperbarui.')"
-                    class="inline-flex items-center gap-2 rounded-xl bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 text-xs font-semibold shadow-theme-xs transition">
-                    <i class="fa-solid fa-cloud-arrow-down text-sm"></i>
-                    <span>Tarik Nilai SAS dari Exam Web</span>
-                </button>
-            </form>
+            <!-- Tombol Tarik Nilai dari CBT Exam Web (Bisa Pilih SAS, STS, atau Asesmen Harian) -->
+            <button type="button" @click="modalSyncCbt = true"
+                class="inline-flex items-center gap-2 rounded-xl bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 text-xs font-semibold shadow-theme-xs transition">
+                <i class="fa-solid fa-cloud-arrow-down text-sm"></i>
+                <span>Tarik Nilai CBT Exam</span>
+                @if(!empty($cbtExams) && count($cbtExams) > 0)
+                    <span class="rounded-full bg-white/20 px-1.5 py-0.5 text-[10px] font-bold">{{ count($cbtExams) }} Ujian</span>
+                @endif
+            </button>
 
             <button type="button" @click="generateAllCapaian()" class="inline-flex items-center gap-2 rounded-xl bg-indigo-600 text-white hover:bg-indigo-700 px-3.5 py-2 text-xs font-semibold shadow-theme-xs transition" title="Otomatis hasilkan narasi capaian seluruh siswa berdasarkan ketercapaian TP & KKM">
                 <i class="fa-solid fa-wand-magic-sparkles text-xs"></i>
@@ -351,47 +368,60 @@
                 @endif
             </div>
 
-            <!-- 2. Rasio Perbandingan Custom Guru -->
+            <!-- 2. Rasio Perbandingan Custom Guru (Harian : STS : SAS) -->
             <div class="space-y-2">
                 <label class="block text-xs font-bold uppercase tracking-wider text-gray-500 dark:text-gray-400">
                     <i class="fa-solid fa-sliders me-1 text-purple-500"></i>
-                    Rasio Bobot Nilai Akhir (Ditentukan Guru)
+                    Rasio Bobot Nilai Akhir (Harian : STS : SAS)
                 </label>
-                <div class="flex flex-wrap items-center gap-3">
-                    <div class="flex items-center gap-2">
+                <div class="flex flex-wrap items-center gap-2.5">
+                    <div class="flex items-center gap-1.5">
                         <span class="text-xs text-gray-600 dark:text-gray-300 font-medium">Harian:</span>
-                        <div class="relative w-20">
+                        <div class="relative w-16">
                             <input type="number" min="0" max="100"
                                 x-model.number="bobotHarian"
                                 @input="recalculateAll()"
-                                class="w-full text-center rounded-lg border border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-800/50 py-1.5 pe-5 text-xs font-bold font-mono text-gray-800 dark:text-white focus:border-brand-500 focus:outline-hidden">
-                            <span class="absolute end-2 top-2 text-[10px] text-gray-400">%</span>
+                                class="w-full text-center rounded-lg border border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-800/50 py-1.5 pe-4 text-xs font-bold font-mono text-gray-800 dark:text-white focus:border-brand-500 focus:outline-hidden">
+                            <span class="absolute end-1.5 top-2 text-[10px] text-gray-400">%</span>
                         </div>
                     </div>
 
                     <span class="text-gray-400 font-bold">:</span>
 
-                    <div class="flex items-center gap-2">
-                        <span class="text-xs text-gray-600 dark:text-gray-300 font-medium">SAS (CBT):</span>
-                        <div class="relative w-20">
+                    <div class="flex items-center gap-1.5">
+                        <span class="text-xs text-amber-600 dark:text-amber-400 font-medium">STS:</span>
+                        <div class="relative w-16">
+                            <input type="number" min="0" max="100"
+                                x-model.number="bobotSts"
+                                @input="recalculateAll()"
+                                class="w-full text-center rounded-lg border border-amber-200 dark:border-amber-800/60 bg-amber-50/50 dark:bg-amber-900/20 py-1.5 pe-4 text-xs font-bold font-mono text-amber-800 dark:text-amber-300 focus:border-amber-500 focus:outline-hidden">
+                            <span class="absolute end-1.5 top-2 text-[10px] text-gray-400">%</span>
+                        </div>
+                    </div>
+
+                    <span class="text-gray-400 font-bold">:</span>
+
+                    <div class="flex items-center gap-1.5">
+                        <span class="text-xs text-purple-600 dark:text-purple-400 font-medium">SAS:</span>
+                        <div class="relative w-16">
                             <input type="number" min="0" max="100"
                                 x-model.number="bobotSas"
                                 @input="recalculateAll()"
-                                class="w-full text-center rounded-lg border border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-800/50 py-1.5 pe-5 text-xs font-bold font-mono text-gray-800 dark:text-white focus:border-purple-500 focus:outline-hidden">
-                            <span class="absolute end-2 top-2 text-[10px] text-gray-400">%</span>
+                                class="w-full text-center rounded-lg border border-purple-200 dark:border-purple-800/60 bg-purple-50/50 dark:bg-purple-900/20 py-1.5 pe-4 text-xs font-bold font-mono text-purple-800 dark:text-purple-300 focus:border-purple-500 focus:outline-hidden">
+                            <span class="absolute end-1.5 top-2 text-[10px] text-gray-400">%</span>
                         </div>
                     </div>
 
                     <!-- Preset Cepat -->
-                    <div class="flex items-center gap-1.5 ms-2">
-                        <button type="button" @click="setPresetRatio(60, 40)" class="rounded-md border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800 px-2 py-1 text-[11px] font-medium text-gray-600 dark:text-gray-300 hover:bg-gray-100" title="Standar Kurikulum Merdeka">
-                            60 : 40
+                    <div class="flex items-center gap-1 ms-1">
+                        <button type="button" @click="setPresetRatio(50, 20, 30)" class="rounded-md border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800 px-2 py-1 text-[11px] font-medium text-gray-600 dark:text-gray-300 hover:bg-gray-100" title="Standar dengan STS">
+                            50:20:30
                         </button>
-                        <button type="button" @click="setPresetRatio(50, 50)" class="rounded-md border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800 px-2 py-1 text-[11px] font-medium text-gray-600 dark:text-gray-300 hover:bg-gray-100" title="Seimbang">
-                            50 : 50
+                        <button type="button" @click="setPresetRatio(40, 30, 30)" class="rounded-md border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800 px-2 py-1 text-[11px] font-medium text-gray-600 dark:text-gray-300 hover:bg-gray-100" title="Proporsional STS & SAS">
+                            40:30:30
                         </button>
-                        <button type="button" @click="setPresetRatio(70, 30)" class="rounded-md border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800 px-2 py-1 text-[11px] font-medium text-gray-600 dark:text-gray-300 hover:bg-gray-100" title="Dominan Harian">
-                            70 : 30
+                        <button type="button" @click="setPresetRatio(60, 0, 40)" class="rounded-md border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800 px-2 py-1 text-[11px] font-medium text-gray-600 dark:text-gray-300 hover:bg-gray-100" title="Tanpa STS (Harian:SAS)">
+                            60:0:40
                         </button>
                     </div>
                 </div>
@@ -436,6 +466,7 @@
         <!-- Hidden input untuk menyimpan konfigurasi rasio dan jumlah sumatif -->
         <input type="hidden" name="jumlah_sumatif" :value="jumlahSumatif">
         <input type="hidden" name="bobot_harian" :value="bobotHarian">
+        <input type="hidden" name="bobot_sts" :value="bobotSts">
         <input type="hidden" name="bobot_sas" :value="bobotSas">
 
         <div class="rounded-2xl border border-gray-200 bg-white shadow-theme-xs dark:border-gray-800 dark:bg-gray-900 overflow-hidden">
@@ -449,13 +480,17 @@
                             <th :colspan="jumlahSumatif + 1" class="py-2 px-3 text-center bg-blue-50/50 dark:bg-blue-500/5 text-blue-700 dark:text-blue-300 border-e border-gray-100 dark:border-gray-800">
                                 Nilai Sumatif Lingkup Materi / Harian (Input Manual Guru)
                             </th>
+                            <th rowspan="2" class="py-3 px-3 text-center w-28 bg-amber-50/50 dark:bg-amber-500/5 text-amber-700 dark:text-amber-300 border-e border-gray-100 dark:border-gray-800">
+                                STS / UTS
+                                <span class="block text-[9px] font-normal text-amber-600 dark:text-amber-400">(Tengah Sem)</span>
+                            </th>
                             <th rowspan="2" class="py-3 px-3 text-center w-28 bg-purple-50/50 dark:bg-purple-500/5 text-purple-700 dark:text-purple-300 border-e border-gray-100 dark:border-gray-800">
                                 SAS / UAS
                                 <span class="block text-[9px] font-normal text-purple-600 dark:text-purple-400">(Exam Web / CBT)</span>
                             </th>
                             <th rowspan="2" class="py-3 px-3 text-center w-28 bg-emerald-50/50 dark:bg-emerald-500/5 text-emerald-800 dark:text-emerald-300 border-e border-gray-100 dark:border-gray-800">
                                 Nilai Akhir
-                                <span class="block text-[9px] font-normal text-emerald-600 dark:text-emerald-400" x-text="'(' + bobotHarian + ':' + bobotSas + ')'"></span>
+                                <span class="block text-[9px] font-normal text-emerald-600 dark:text-emerald-400" x-text="'(' + bobotHarian + ':' + bobotSts + ':' + bobotSas + ')'"></span>
                             </th>
                             <th rowspan="2" class="py-3 px-3 text-center w-32 border-e border-gray-100 dark:border-gray-800">Predikat</th>
                             <th rowspan="2" class="py-3 px-4 text-start min-w-[340px]">Capaian Kompetensi / Catatan Rapor</th>
@@ -535,6 +570,16 @@
                                     </span>
                                 </td>
 
+                                <!-- Nilai STS / UTS (Sumatif Tengah Semester) -->
+                                <td class="py-2 px-2 text-center bg-amber-50/20 dark:bg-amber-500/5 border-e border-gray-100 dark:border-gray-800">
+                                    <input type="number" step="0.1" min="0" max="100"
+                                        name="nilai[{{ $s->id }}][sts]"
+                                        x-model="scores[{{ $s->id }}].sts"
+                                        @input="recalculate({{ $s->id }})"
+                                        placeholder="0-100"
+                                        class="w-20 text-center rounded-lg border border-amber-200 dark:border-amber-800/60 bg-amber-50/50 dark:bg-amber-900/20 px-1.5 py-1.5 text-xs text-amber-900 dark:text-amber-200 font-mono font-bold focus:border-amber-500 focus:outline-hidden">
+                                </td>
+
                                 <!-- Nilai SAS / UAS (Bisa ditarik dari CBT atau diedit manual) -->
                                 <td class="py-2 px-2 text-center bg-purple-50/20 dark:bg-purple-500/5 border-e border-gray-100 dark:border-gray-800">
                                     <input type="number" step="0.1" min="0" max="100"
@@ -597,7 +642,7 @@
             <div class="mx-auto flex max-w-7xl items-center justify-between">
                 <div class="flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
                     <i class="fa-solid fa-circle-info text-brand-500 text-xs"></i>
-                    <span>Nilai akhir dihitung secara real-time dengan rasio <strong class="text-gray-700 dark:text-gray-200" x-text="bobotHarian + '% Harian : ' + bobotSas + '% SAS'"></strong>.</span>
+                    <span>Nilai akhir dihitung secara real-time dengan rasio <strong class="text-gray-700 dark:text-gray-200" x-text="bobotHarian + '% Harian : ' + bobotSts + '% STS : ' + bobotSas + '% SAS'"></strong>.</span>
                 </div>
                 <div class="flex items-center gap-3">
                     <a href="{{ route('penilaian.index') }}" class="rounded-xl border border-gray-200 dark:border-gray-700 px-4 py-2.5 text-xs font-semibold text-gray-600 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-800 transition">
@@ -611,6 +656,148 @@
             </div>
         </div>
     </form>
+
+    <!-- MODAL: Tarik Nilai dari CBT Exam Web (SAS, STS, atau Asesmen Harian) -->
+    <div x-show="modalSyncCbt" x-cloak class="fixed inset-0 z-999 flex items-center justify-center bg-gray-900/60 p-4 backdrop-blur-sm"
+        @keydown.escape.window="modalSyncCbt = false">
+        <div class="w-full max-w-lg rounded-2xl bg-white dark:bg-gray-900 shadow-theme-xl border border-gray-200 dark:border-gray-800 p-6 space-y-5 max-h-[90vh] overflow-y-auto"
+            @click.outside="modalSyncCbt = false">
+            <div class="flex items-center justify-between border-b border-gray-100 dark:border-gray-800 pb-3">
+                <div class="flex items-center gap-2.5">
+                    <div class="flex h-9 w-9 items-center justify-center rounded-xl bg-purple-50 text-purple-600 dark:bg-purple-500/10 dark:text-purple-400">
+                        <i class="fa-solid fa-cloud-arrow-down text-base"></i>
+                    </div>
+                    <div>
+                        <h3 class="text-sm font-bold text-gray-900 dark:text-white">
+                            Tarik Nilai dari CBT Exam Web
+                        </h3>
+                        <p class="text-[11px] text-gray-400">Pilih jenis asesmen dan tujuan kolom nilai di E-Rapor</p>
+                    </div>
+                </div>
+                <button type="button" @click="modalSyncCbt = false" class="text-gray-400 hover:text-gray-600 text-sm">
+                    <i class="fa-solid fa-xmark"></i>
+                </button>
+            </div>
+
+            <form action="{{ route('penilaian.sync-cbt', [$kelas->id, $mapel->id]) }}" method="POST" class="space-y-4">
+                @csrf
+
+                <!-- 1. Pilihan Target Kolom Penilaian -->
+                <div>
+                    <label class="block text-xs font-semibold text-gray-700 dark:text-gray-300 mb-2">
+                        Pilih Target Penilaian di E-Rapor:
+                    </label>
+                    <div class="grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs">
+                        <!-- Target SAS -->
+                        <label class="flex flex-col p-3 rounded-xl border cursor-pointer transition"
+                            :class="syncTargetType === 'sas' ? 'border-purple-500 bg-purple-50/50 dark:bg-purple-950/20 text-purple-900 dark:text-purple-200' : 'border-gray-200 dark:border-gray-800 hover:bg-gray-50 dark:hover:bg-gray-800/50 text-gray-700 dark:text-gray-300'">
+                            <div class="flex items-center justify-between mb-1">
+                                <span class="font-bold">SAS / UAS</span>
+                                <input type="radio" name="target_type" value="sas" x-model="syncTargetType" class="text-purple-600 focus:ring-purple-500">
+                            </div>
+                            <span class="text-[10px] text-gray-500 dark:text-gray-400 leading-tight">Asesmen Akhir Semester</span>
+                        </label>
+
+                        <!-- Target STS -->
+                        <label class="flex flex-col p-3 rounded-xl border cursor-pointer transition"
+                            :class="syncTargetType === 'sts' ? 'border-amber-500 bg-amber-50/50 dark:bg-amber-950/20 text-amber-900 dark:text-amber-200' : 'border-gray-200 dark:border-gray-800 hover:bg-gray-50 dark:hover:bg-gray-800/50 text-gray-700 dark:text-gray-300'">
+                            <div class="flex items-center justify-between mb-1">
+                                <span class="font-bold">STS / UTS</span>
+                                <input type="radio" name="target_type" value="sts" x-model="syncTargetType" class="text-amber-600 focus:ring-amber-500">
+                            </div>
+                            <span class="text-[10px] text-gray-500 dark:text-gray-400 leading-tight">Sumatif Tengah Semester</span>
+                        </label>
+
+                        <!-- Target Harian -->
+                        <label class="flex flex-col p-3 rounded-xl border cursor-pointer transition"
+                            :class="syncTargetType === 'harian' ? 'border-blue-500 bg-blue-50/50 dark:bg-blue-950/20 text-blue-900 dark:text-blue-200' : 'border-gray-200 dark:border-gray-800 hover:bg-gray-50 dark:hover:bg-gray-800/50 text-gray-700 dark:text-gray-300'">
+                            <div class="flex items-center justify-between mb-1">
+                                <span class="font-bold">Sumatif Harian</span>
+                                <input type="radio" name="target_type" value="harian" x-model="syncTargetType" class="text-blue-600 focus:ring-blue-500">
+                            </div>
+                            <span class="text-[10px] text-gray-500 dark:text-gray-400 leading-tight">Kuis / Ulangan Harian (TP)</span>
+                        </label>
+                    </div>
+                </div>
+
+                <!-- 2. Opsi Pemilihan Kolom Sumatif (Jika Target Harian) -->
+                <div x-show="syncTargetType === 'harian'" class="p-3 rounded-xl bg-blue-50/60 dark:bg-blue-950/20 border border-blue-200 dark:border-blue-800 space-y-2">
+                    <label class="block text-xs font-semibold text-blue-900 dark:text-blue-200">
+                        Masukkan ke Kolom Sumatif Ke:
+                    </label>
+                    <select name="sumatif_index" x-model.number="syncSumatifIndex"
+                        class="w-full rounded-xl border border-blue-200 dark:border-blue-700 bg-white dark:bg-gray-800 px-3 py-2 text-xs font-semibold text-gray-800 dark:text-white focus:outline-hidden">
+                        <template x-for="i in jumlahSumatif" :key="i">
+                            <option :value="i" x-text="'Sumatif ' + i + (tpsList[i-1] ? ' (' + (tpsList[i-1].ringkasan_materi || tpsList[i-1].kode_tp) + ')' : '')"></option>
+                        </template>
+                    </select>
+                    <p class="text-[10px] text-blue-700 dark:text-blue-300">
+                        Nilai dari CBT akan langsung mengisi kolom sumatif terpilih dan memperbarui Rata-rata Harian & Nilai Akhir secara otomatis.
+                    </p>
+                </div>
+
+                <!-- 3. Pilihan Ujian Spesifik di CBT (Optional / Auto) -->
+                <div>
+                    <label class="block text-xs font-semibold text-gray-700 dark:text-gray-300 mb-1.5 flex items-center justify-between">
+                        <span>Pilih Pelaksanaan Ujian di CBT:</span>
+                        <span class="text-[10px] text-gray-400 font-normal">Opsional (Default: Otomatis)</span>
+                    </label>
+
+                    @if(!empty($cbtExams) && count($cbtExams) > 0)
+                        <div class="space-y-1.5 max-h-48 overflow-y-auto rounded-xl border border-gray-200 dark:border-gray-800 p-2 bg-gray-50/50 dark:bg-gray-800/30">
+                            <!-- Opsi Otomatis -->
+                            <label class="flex items-center gap-2 p-2 rounded-lg hover:bg-white dark:hover:bg-gray-800 cursor-pointer text-xs border border-transparent transition"
+                                :class="syncUjianId === '' ? 'bg-white dark:bg-gray-800 border-gray-200 dark:border-gray-700 shadow-xs' : ''">
+                                <input type="radio" name="ujian_id" value="" x-model="syncUjianId" class="text-purple-600 focus:ring-purple-500">
+                                <div>
+                                    <div class="font-semibold text-gray-800 dark:text-white">Otomatis Deteksi Ujian Paling Relevan</div>
+                                    <div class="text-[10px] text-gray-400">Sistem otomatis mencocokkan tipe ujian dan kode mapel</div>
+                                </div>
+                            </label>
+
+                            @foreach($cbtExams as $exam)
+                                <label class="flex items-center gap-2 p-2 rounded-lg hover:bg-white dark:hover:bg-gray-800 cursor-pointer text-xs border border-transparent transition"
+                                    :class="syncUjianId == '{{ $exam['id'] }}' ? 'bg-white dark:bg-gray-800 border-purple-300 dark:border-purple-700 shadow-xs' : ''">
+                                    <input type="radio" name="ujian_id" value="{{ $exam['id'] }}" x-model="syncUjianId" class="text-purple-600 focus:ring-purple-500">
+                                    <div class="flex-1 min-w-0">
+                                        <div class="flex items-center justify-between">
+                                            <span class="font-semibold text-gray-800 dark:text-white truncate">{{ $exam['nama_ujian'] }}</span>
+                                            <span class="rounded px-1.5 py-0.5 text-[9px] font-mono font-bold uppercase
+                                                {{ $exam['tipe_ujian'] === 'asesmen_akhir_semester' ? 'bg-purple-100 text-purple-700 dark:bg-purple-950/40 dark:text-purple-300' : ($exam['tipe_ujian'] === 'asesmen_harian' ? 'bg-blue-100 text-blue-700 dark:bg-blue-950/40 dark:text-blue-300' : 'bg-amber-100 text-amber-700 dark:bg-amber-950/40 dark:text-amber-300') }}">
+                                                {{ $exam['tipe_ujian'] }}
+                                            </span>
+                                        </div>
+                                        <div class="flex items-center gap-2 text-[10px] text-gray-400 mt-0.5 font-mono">
+                                            <span>ID: {{ $exam['exam_id'] }}</span>
+                                            <span>•</span>
+                                            <span>{{ $exam['tanggal'] ?: 'Tanggal belum diisi' }}</span>
+                                            <span>•</span>
+                                            <span class="text-emerald-600 dark:text-emerald-400 font-semibold">{{ $exam['jumlah_peserta_selesai'] }} Siswa Selesai</span>
+                                        </div>
+                                    </div>
+                                </label>
+                            @endforeach
+                        </div>
+                    @else
+                        <div class="rounded-xl border border-dashed border-gray-200 dark:border-gray-700 p-3 text-center text-xs text-gray-400">
+                            <i class="fa-solid fa-circle-info text-gray-300 mb-1 block text-sm"></i>
+                            Sistem akan secara otomatis mendeteksi ujian yang cocok di database CBT untuk mata pelajaran ini.
+                        </div>
+                    @endif
+                </div>
+
+                <div class="flex items-center justify-end gap-2.5 pt-3 border-t border-gray-100 dark:border-gray-800">
+                    <button type="button" @click="modalSyncCbt = false" class="rounded-xl border border-gray-200 dark:border-gray-700 px-4 py-2 text-xs font-semibold text-gray-600 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-800 transition">
+                        Batal
+                    </button>
+                    <button type="submit" class="rounded-xl bg-purple-600 hover:bg-purple-700 px-5 py-2 text-xs font-semibold text-white shadow-theme-xs transition flex items-center gap-1.5">
+                        <i class="fa-solid fa-cloud-arrow-down text-xs"></i>
+                        <span>Mulai Tarik Nilai CBT</span>
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
 
 </div>
 @endsection

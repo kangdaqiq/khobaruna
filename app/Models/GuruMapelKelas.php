@@ -17,6 +17,7 @@ class GuruMapelKelas extends Model
         'semester',
         'jumlah_sumatif',
         'bobot_harian',
+        'bobot_sts',
         'bobot_sas',
         'sync_id',
     ];
@@ -24,6 +25,7 @@ class GuruMapelKelas extends Model
     protected $casts = [
         'jumlah_sumatif' => 'integer',
         'bobot_harian' => 'integer',
+        'bobot_sts' => 'integer',
         'bobot_sas' => 'integer',
     ];
 
