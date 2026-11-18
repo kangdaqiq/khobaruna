@@ -19,9 +19,9 @@ class AbsensiSyncService
 
     public function __construct()
     {
-        $rawUrl = env('SYNC_API_URL', 'http://127.0.0.1:8080/api/cbt-sync');
+        $rawUrl = config('services.sync.api_url') ?: env('SYNC_API_URL', 'http://absen.jagattech.my.id/api/cbt-sync');
         $this->apiUrl = rtrim($rawUrl, '/');
-        $this->apiKey = env('SYNC_API_KEY', 'cbt_secret_sync_2026');
+        $this->apiKey = config('services.sync.api_key') ?: env('SYNC_API_KEY', 'cbt_secret_sync_2026');
     }
 
     /**

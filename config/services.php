@@ -35,4 +35,10 @@ return [
         ],
     ],
 
+    'sync' => [
+        'api_url' => env('SYNC_API_URL', 'http://absen.jagattech.my.id/api/cbt-sync'),
+        'api_key' => env('SYNC_API_KEY', 'cbt_secret_sync_2026'),
+        'school_id' => env('SYNC_SCHOOL_ID', 6),
+    ],
+
 ];
